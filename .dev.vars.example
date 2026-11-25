@@ -1,0 +1,6 @@
+# Local environment variables for `npx wrangler dev`.
+# For production on Cloudflare Workers, configure secrets with:
+#   npx wrangler secret put SESSION_SECRET
+#   npx wrangler secret put DEFAULT_LIVE_PLAYLIST_URL
+
+DEFAULT_LIVE_PLAYLIST_URL=""

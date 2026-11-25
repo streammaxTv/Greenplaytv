@@ -3,7 +3,9 @@ import Hls from 'hls.js';
 import {
   AlertCircle,
   ArrowLeft,
+  Check,
   ChevronRight,
+  FastForward,
   ListVideo,
   Maximize,
   Minimize,
@@ -12,12 +14,26 @@ import {
   Plug,
   Radio,
   RotateCcw,
+  Scan,
   SkipForward,
   Volume2,
   VolumeX,
   X,
 } from 'lucide-react';
 import type {EpisodeItem, MediaItem, PlayerTarget} from '../types/catalog';
+
+type VideoFitMode = 'contain' | 'cover' | 'fill';
+
+const FIT_MODE_STORAGE_KEY = 'greenplay_player_fit_mode';
+
+const FIT_MODE_OPTIONS: {value: VideoFitMode; label: string; shortLabel: string}[] = [
+  {value: 'contain', label: 'Ajustar (Original)', shortLabel: 'Ajustar'},
+  {value: 'cover', label: 'Preencher tela', shortLabel: 'Preencher'},
+  {value: 'fill', label: 'Esticar bordas', shortLabel: 'Esticar'},
+];
+
+const INTRO_SKIP_SECONDS = 85;
+const INTRO_WINDOW_MAX_SECONDS = 300;
 
 interface VideoPlayerModalProps {
   target: PlayerTarget;
@@ -61,6 +77,19 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [drawerMode, setDrawerMode] = useState<'none' | 'episodes' | 'channels'>('none');
+  const [fitMode, setFitMode] = useState<VideoFitMode>(() => {
+    try {
+      const saved = window.localStorage.getItem(FIT_MODE_STORAGE_KEY);
+      if (saved === 'contain' || saved === 'cover' || saved === 'fill') {
+        return saved;
+      }
+    } catch {
+      // Ignore storage failures
+    }
+    return 'contain';
+  });
+  const [showFitMenu, setShowFitMenu] = useState(false);
+  const [introSkipped, setIntroSkipped] = useState(false);
   const [retrySeed, setRetrySeed] = useState(0);
 
   const controlsTimerRef = useRef<number | null>(null);
@@ -80,11 +109,11 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }
     setShowControls(true);
     controlsTimerRef.current = window.setTimeout(() => {
-      if (drawerMode === 'none') {
+      if (drawerMode === 'none' && !showFitMenu) {
         setShowControls(false);
       }
     }, 3500);
-  }, [drawerMode]);
+  }, [drawerMode, showFitMenu]);
 
   const flushProgress = useCallback(
     (force = false) => {
@@ -114,6 +143,8 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setIsLoading(true);
     setCurrentTime(0);
     setDuration(0);
+    setIntroSkipped(false);
+    setShowFitMenu(false);
 
     if (hlsRef.current) {
       hlsRef.current.destroy();
@@ -219,7 +250,8 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (drawerMode !== 'none') setDrawerMode('none');
+        if (showFitMenu) setShowFitMenu(false);
+        else if (drawerMode !== 'none') setDrawerMode('none');
         else onClose();
       } else if (e.key === ' ' && target.streamUrl) {
         e.preventDefault();
@@ -289,10 +321,54 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }
   };
 
+  const handleSelectFitMode = (mode: VideoFitMode) => {
+    setFitMode(mode);
+    setShowFitMenu(false);
+    try {
+      window.localStorage.setItem(FIT_MODE_STORAGE_KEY, mode);
+    } catch {
+      // Ignore storage errors
+    }
+    scheduleHideControls();
+  };
+
+  const handleSkipIntro = () => {
+    const video = videoRef.current;
+    if (!video || target.mediaType === 'live') return;
+    const maxTarget =
+      Number.isFinite(video.duration) && video.duration > 2
+        ? video.duration - 2
+        : Number.MAX_SAFE_INTEGER;
+    const nextPos = Math.min(video.currentTime + INTRO_SKIP_SECONDS, maxTarget);
+    video.currentTime = nextPos;
+    setCurrentTime(nextPos);
+    setIntroSkipped(true);
+    flushProgress(true);
+    scheduleHideControls();
+  };
+
   const handleClose = () => {
     flushProgress(true);
     onClose();
   };
+
+  const videoFitClass =
+    fitMode === 'cover'
+      ? 'object-cover'
+      : fitMode === 'fill'
+        ? 'object-fill'
+        : 'object-contain';
+
+  const canSkipIntro =
+    target.mediaType !== 'live' &&
+    Boolean(target.streamUrl) &&
+    !errorMessage &&
+    !introSkipped &&
+    currentTime < INTRO_WINDOW_MAX_SECONDS &&
+    (duration === 0 || currentTime + 15 < duration);
+
+  const currentFitLabel =
+    FIT_MODE_OPTIONS.find((opt) => opt.value === fitMode)?.shortLabel || 'Ajustar';
 
   return (
     <div
@@ -414,7 +490,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 if (!videoRef.current) return;
                 setDuration(videoRef.current.duration || 0);
               }}
-              className="w-full h-full max-w-full max-h-full object-contain"
+              className={`w-full h-full max-w-full max-h-full ${videoFitClass}`}
             />
 
             {isLoading && !errorMessage && (
@@ -459,9 +535,23 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       {target.streamUrl && !errorMessage && (
         <div
           className={`relative z-30 px-4 sm:px-6 pb-5 pt-10 bg-gradient-to-t from-black/95 via-black/65 to-transparent transition-opacity duration-200 ${
-            showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+            showControls || showFitMenu ? 'opacity-100' : 'opacity-0 pointer-events-none'
           }`}
         >
+          {/* Compact Skip Intro Button (Movies & Series Episodes only) */}
+          {canSkipIntro && (
+            <div className="mb-3 flex justify-end">
+              <button
+                type="button"
+                onClick={handleSkipIntro}
+                className="inline-flex items-center gap-1.5 min-h-[36px] px-3 py-1.5 rounded-lg border border-emerald-500/45 bg-[#0D1210]/90 hover:bg-emerald-500 text-emerald-300 hover:text-[#04120B] text-xs font-semibold tracking-wide backdrop-blur-md transition-colors shadow-lg cursor-pointer"
+              >
+                <FastForward className="h-3.5 w-3.5 shrink-0" />
+                <span>Pular abertura</span>
+              </button>
+            </div>
+          )}
+
           {/* Seek Bar for VOD */}
           {target.mediaType !== 'live' && duration > 0 && (
             <div className="mb-3 flex items-center gap-3">
@@ -483,7 +573,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             </div>
           )}
 
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center justify-between gap-2 sm:gap-3">
             <div className="flex items-center gap-2 sm:gap-3">
               <button
                 type="button"
@@ -541,6 +631,60 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   <span className="hidden sm:inline">Próximo episódio</span>
                 </button>
               )}
+
+              {/* Border Fill Mode Selector (All Players) */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowFitMenu((prev) => !prev);
+                    scheduleHideControls();
+                  }}
+                  className={`min-h-[44px] inline-flex items-center gap-2 px-3 rounded-xl border text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
+                    showFitMenu || fitMode !== 'contain'
+                      ? 'border-emerald-500/45 bg-emerald-500/15 text-emerald-300'
+                      : 'border-transparent bg-white/10 hover:bg-white/20 text-white'
+                  }`}
+                  aria-label="Escolher preenchimento das bordas"
+                  aria-expanded={showFitMenu}
+                  title="Preenchimento das bordas"
+                >
+                  <Scan className="h-4 w-4 shrink-0" />
+                  <span className="hidden sm:inline">{currentFitLabel}</span>
+                </button>
+
+                {showFitMenu && (
+                  <div
+                    className="absolute right-0 bottom-full mb-2 w-48 rounded-xl border border-white/10 bg-[#0D1210]/95 backdrop-blur-lg p-1.5 shadow-2xl"
+                    role="menu"
+                    aria-label="Modo de preenchimento das bordas"
+                  >
+                    <div className="px-2.5 py-1.5 text-[11px] font-medium text-[#8C9B93]">
+                      Preenchimento das bordas
+                    </div>
+                    {FIT_MODE_OPTIONS.map((option) => {
+                      const active = fitMode === option.value;
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={active}
+                          onClick={() => handleSelectFitMode(option.value)}
+                          className={`w-full min-h-[40px] px-2.5 py-2 rounded-lg flex items-center justify-between gap-2 text-xs font-medium transition-colors cursor-pointer ${
+                            active
+                              ? 'bg-emerald-500/15 text-emerald-300'
+                              : 'text-[#D1DBD5] hover:bg-white/[0.06]'
+                          }`}
+                        >
+                          <span>{option.label}</span>
+                          {active && <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
 
               <button
                 type="button"
